@@ -1,0 +1,1287 @@
+---
+title: "Nanonets Assignment"
+author: "Shilpa Rai"
+date: "April 07, 2019"
+output: html_document
+---
+
+## load required libraries
+
+library(data.table)  
+library(tidyverse)  
+library(jsonlite)  
+library(dplyr)  
+library(readr) 
+library(stringr)  
+library(VIM) 
+library(naniar)  
+library(DataExplorer)  
+library(splitstackshape) 
+library(tm)  
+library(RWeka)  
+library(wordcloud) 
+library(qdapRegex) 
+library(GGally) 
+library(Rlof)  
+library(caret)  
+library(h2o)  
+library(onehot) 
+library(mice)  
+library(Metrics)
+
+
+```{r}
+
+#setwd(".")
+setwd(".")
+
+suppressPackageStartupMessages(library(data.table))
+suppressPackageStartupMessages(library(caret))
+suppressPackageStartupMessages(library(plyr))
+suppressPackageStartupMessages(library(dplyr))
+suppressPackageStartupMessages(library(naniar))
+suppressPackageStartupMessages(library(VIM))
+suppressPackageStartupMessages(library(randomForest))
+suppressPackageStartupMessages(library(ggplot2))
+suppressPackageStartupMessages(library(summarytools))
+suppressPackageStartupMessages(library(tidyverse))
+suppressPackageStartupMessages(library(tm))
+suppressPackageStartupMessages(library(DataExplorer))
+suppressPackageStartupMessages(library(wordcloud))
+suppressPackageStartupMessages(library(RWeka))
+suppressPackageStartupMessages(library(h2o))
+suppressPackageStartupMessages(library(onehot))
+suppressPackageStartupMessages(library(mice))
+suppressPackageStartupMessages(library(qdapRegex))
+suppressPackageStartupMessages(library(GGally))
+suppressPackageStartupMessages(library(Rlof))
+suppressPackageStartupMessages(library(jsonlite))
+suppressPackageStartupMessages(library(splitstackshape))
+suppressPackageStartupMessages(library(Metrics))
+
+```
+
+```{r datainfo}
+
+#### read data ####
+
+start = Sys.time()
+train_data = read_csv("train.csv",col_names = TRUE)
+test_data = read_csv("test.csv",col_names = TRUE)
+end = Sys.time()
+cat("Time taken to loda data :", end-start,'\n')
+
+rm(start,end)
+```
+
+# User defined functions
+
+```{r}
+### User defined functions ####
+
+# a. Function to get words frequency and word cloud
+
+word_cloud = function(text,minfreq,ngram,stp_wrds){
+  
+  summaryCorpus = Corpus(VectorSource(text))
+  # Convert the text to lower case
+  summaryCorpus = tm_map(summaryCorpus, content_transformer(tolower))
+  # Remove numbers
+  summaryCorpus = tm_map(summaryCorpus, removeNumbers)
+  # Remove stopwords
+  #stp_wrds = c("name","id","based","film","i","ii","iii")
+  summaryCorpus = tm_map(summaryCorpus, removeWords, c(stp_wrds,stopwords("english")))
+  # Remove punctuations
+  summaryCorpus = tm_map(summaryCorpus, removePunctuation)
+  # Eliminate extra white spaces
+  summaryCorpus = tm_map(summaryCorpus, stripWhitespace)
+  as.character(summaryCorpus[[1]])
+  token_delim = " \\t\\r\\n.!?,;\"()"
+  token = NGramTokenizer(summaryCorpus, Weka_control(min=ngram,max=ngram, delimiters = token_delim))
+  ngram_df = data.frame(table(token))
+  ngram_df = ngram_df[order(ngram_df$Freq,decreasing=TRUE),]
+  
+  head(ngram_df)
+  wordcloud(ngram_df$token,ngram_df$Freq,random.order=FALSE,scale = c(2,0.35),min.freq = minfreq,colors = brewer.pal(8,"Dark2"),max.words=150)
+  
+  return(ngram_df)
+  
+}
+
+# b. get gender count
+
+
+gender_count = function(x,id){
+  
+  if(!is.na(x)){
+    x = gsub("[^[:alnum:][:space:](_)]", "", x)
+    y = str_extract_all(x, "(?<=gender )[0-9]*")[[1]]
+    count = length(y[y==id])
+  } else count = 0
+  return(count)
+}
+
+# c. get cast count
+
+get_cast = function(x){
+  
+  if(!is.na(x)){
+    x = gsub("[^[:alnum:][:space:](_)]", "", x)
+    count = length(str_extract_all(x, "(?<=cast_id )[0-9]*")[[1]]) 
+  } else count = 0
+  
+  return(count)
+}
+
+# d. get crew count
+
+get_crew = function(x){
+  
+  if(!is.na(x)){
+    x = gsub("[^[:alnum:][:space:](_)]", "", x)
+    count =length(str_extract_all(x, "(?<=credit_id )[0-9]*")[[1]])
+  }else count = 0
+  return(count)
+  
+}
+
+# d. get department
+
+get_department = function(x){
+  x = gsub("[^[:alnum:][:space:](_|\\|&')]", "", x)
+  dept = qdapRegex::ex_between(x, "'department' '", "' '")[[1]]
+  return(dept)
+}
+
+get_production_comp = function(x){
+  x = gsub("[^[:alnum:][:space:](&')]", "", x)
+  prod_comp = qdapRegex::ex_between(x, "'name' '", "' '")[[1]]
+  return(prod_comp)
+}
+
+```
+
+
+# Exploratory Analysis
+
+```{r}
+
+#View(train_data) # view data
+
+train_data$collection_cat = ifelse(!is.na(train_data$belongs_to_collection),1,0)
+test_data$collection_cat = ifelse(!is.na(test_data$belongs_to_collection),1,0)
+
+
+plot_missing(train_data) # visual representation
+plot_missing(test_data)
+
+# get the summary of missing values for each variable in our data
+missing_data_summary = miss_var_summary(train_data)
+missing_data_summary
+missing_data_summary_cutoff = missing_data_summary[missing_data_summary$pct_miss<=20.0,] # retain variables with 20% or less missing values
+vars = paste0(missing_data_summary_cutoff$variable) # selected variables
+
+train_data = train_data[,vars]
+test_data = test_data[,vars[vars!="revenue"]]
+
+rm(vars,missing_data_summary,missing_data_summary_cutoff)
+
+plot_missing(train_data) 
+plot_missing(test_data) 
+
+#checking the dimension of the input dataset and the type of variables
+plot_str(train_data)
+
+# convert date column to date
+
+train_data$release_date = as.Date(train_data$release_date, format = "%d/%m/%Y")
+test_data$release_date = as.Date(test_data$release_date, format = "%d/%m/%Y")
+
+# extract month, day,year, from release date
+
+train_data$year = as.numeric(format(train_data$release_date, "%Y"))
+train_data$year = as.numeric(format(train_data$release_date, "%Y"))
+
+plot_histogram(train_data$year)
+
+# some years are not correct,ex- not possible to have movies with status = released and year >2019
+
+currentYear = as.numeric(format(Sys.Date(), "%Y"))
+train_data$year[train_data$year>currentYear] = 1900+as.numeric(str_sub(train_data$year[train_data$year>currentYear],-2,-1))
+train_data$month = format(train_data$release_date, "%m")
+train_data$day = format(train_data$release_date, "%d")
+train_data$weekday = weekdays(train_data$release_date)
+
+
+test_data$release_date[is.na(test_data$release_date)] = min(test_data$release_date,na.rm = TRUE) # assuming that old movies do not have all information available
+test_data$year = as.numeric(format(test_data$release_date, "%Y"))
+plot_histogram(test_data$year)
+
+currentYear = as.numeric(format(Sys.Date(), "%Y"))
+test_data$year[test_data$year>currentYear] = 1900+as.numeric(str_sub(test_data$year[test_data$year>currentYear],-2,-1))
+test_data$month = format(test_data$release_date, "%m")
+test_data$day = format(test_data$release_date, "%d")
+test_data$weekday = weekdays(test_data$release_date)
+
+# Year distribution plot after correction
+plot_histogram(train_data$year)
+plot_histogram(test_data$year)
+
+rm(currentYear)
+gc()
+
+```
+
+
+**Text Analysis & Feature Engineering There are many text column data, with ID and Name. We do not know how many unique values are there for each column. Using word cloud and word frequency, we get high level of understanding and this will also help in defining catergories if there are so many categories let's start with each text column**
+
+
+**1. Genres**
+```{r}
+text = train_data[!is.na(train_data$genres),"genres"]
+text = cSplit(text,"genres",sep = "name", direction = "long")
+text = as.character(text$genres)
+text = gsub("[[:punct:]]", "", text)
+text = gsub("[[:digit:]]", "", text)
+text = gsub("id", "", text)
+text = str_squish(text)
+text = text[text!=""]
+text = text[!is.na(text)]
+text_df = data.frame(genre = as.factor(text))
+text_df = text_df %>% count(genre) %>% group_by(genre)
+text_df = text_df[order(text_df$genre, decreasing = TRUE),]
+wordcloud(text_df$genre,text_df$n,random.order=FALSE,scale = c(2,0.35),min.freq = 2,colors = brewer.pal(8,"Dark2"),max.words=150)
+
+# create genre data frame, in order to capture multiple genres for films
+genres_list = unique(text_df$genre)
+genres_list = genres_list[which(!is.na(genres_list))]
+
+# for train data
+genre_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(genres_list))
+genre_tr_data = data.frame(genre_tr_data)
+colnames(genre_tr_data) = genres_list
+
+for(genre in genres_list){
+  
+  print(genre)
+  genre_tr_data[,genre] = ifelse(str_detect(train_data$genres,genre),1,0)
+  
+}
+
+genre_tr_data[is.na(genre_tr_data)] = 0
+colSums(genre_tr_data,na.rm = TRUE) # the distribution
+
+# for test data
+
+genre_te_data = matrix(0,nrow = nrow(test_data),ncol = length(genres_list))
+genre_te_data = data.frame(genre_te_data)
+colnames(genre_te_data) = genres_list
+
+for(genre in genres_list){
+  
+  print(genre)
+  genre_te_data[,genre] = ifelse(str_detect(test_data$genres,genre),1,0)
+  
+}
+
+genre_te_data[is.na(genre_te_data)] = 0
+colSums(genre_te_data,na.rm = TRUE) # the distribution
+
+rm(text,text_df,genre,genres_list)
+gc()
+
+```
+
+**2. Original Title**
+```{r }
+
+original_title_freq = word_cloud(text = train_data$original_title[!is.na(train_data$original_title)],
+                                 minfreq = 2,
+                                 ngram = 1,stp_wrds = c()) # sing word
+head(original_title_freq)
+
+orginial_title_freq = word_cloud(text = train_data$original_title[!is.na(train_data$original_title)],
+                                 minfreq = 2,
+                                 ngram = 2,stp_wrds = c()) # bi-gram
+head(original_title_freq)
+
+```
+
+**3. Overview**
+```{r }
+overview_freq = word_cloud(text = train_data$overview[!is.na(train_data$overview)],
+                                 minfreq = 2,
+                                 ngram = 1,stp_wrds = c("two","one","story",
+                                                        "will","must")) # sing word
+head(overview_freq)
+
+# create overview data frame, in order to capture multiple overview for films
+overview_list = unique(overview_freq$token[1:10])
+overview_list = as.character(overview_list)
+
+# for train data
+overview_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(overview_list))
+overview_tr_data = data.frame(overview_tr_data)
+colnames(overview_tr_data) = overview_list
+
+for(overview in overview_list){
+  
+  print(overview)
+  overview_tr_data[,overview] = ifelse(str_detect(train_data$overview,overview),1,0)
+  
+}
+
+overview_tr_data[is.na(overview_tr_data)] = 0
+colSums(overview_tr_data,na.rm = TRUE) # the distribution
+
+# for test data
+
+overview_te_data = matrix(0,nrow = nrow(test_data),ncol = length(overview_list))
+overview_te_data = data.frame(overview_te_data)
+colnames(overview_te_data) = overview_list
+
+for(overview in overview_list){
+  
+  print(overview)
+  overview_te_data[,overview] = ifelse(str_detect(test_data$overview,overview),1,0)
+  
+}
+
+overview_te_data[is.na(overview_te_data)] = 0
+colSums(overview_te_data,na.rm = TRUE) # the distribution
+
+
+
+rm(text,text_df,overview,overview_list)
+gc()
+
+
+overview_freq = word_cloud(text = train_data$overview[!is.na(train_data$overview)],
+                                 minfreq = 2,
+                                 ngram = 2,stp_wrds = c()) # bi-gram
+
+head(overview_freq)
+
+```
+
+** 4. Production Companies**
+```{r motivecloud}
+
+
+# get_production_comp = function(x){
+#   x = gsub("[^[:alnum:][:space:](&')]", "", x)
+#   prod_comp = qdapRegex::ex_between(x, "'name' '", "' '")[[1]]
+#   return(prod_comp)
+# }
+
+text = paste0(train_data$production_companies[!is.na(train_data$production_companies)],collapse = " ")
+
+total_prod_copm = get_production_comp(text)
+total_prod_copm = total_prod_copm[total_prod_copm!=""]
+total_prod_copm = data.frame(total_prod_copm)
+total_prod_copm = total_prod_copm %>% count(total_prod_copm) %>% group_by(total_prod_copm)
+total_prod_copm = total_prod_copm[order(total_prod_copm$n, decreasing = TRUE),]
+
+wordcloud(total_prod_copm$total_prod_copm,total_prod_copm$n,random.order=FALSE,scale = c(2,0.35),min.freq = 2,colors = brewer.pal(8,"Dark2"),max.words=150)
+
+n=10
+
+top_n_companies = total_prod_copm[1:n,"total_prod_copm"]
+top_n_companies = paste0(top_n_companies$total_prod_copm)
+
+# training data
+prod_comp_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(top_n_companies))
+prod_comp_tr_data = data.frame(prod_comp_tr_data)
+colnames(prod_comp_tr_data) = top_n_companies
+
+for(prod_comp in top_n_companies){
+  print(prod_comp)
+  prod_comp_tr_data[,prod_comp] = ifelse(str_detect(train_data$production_companies,prod_comp),1,0) # get count
+}
+
+prod_comp_tr_data[is.na(prod_comp_tr_data)] = 0
+colSums(prod_comp_tr_data,na.rm = TRUE) # the distribution
+
+# testing data - production companies
+prod_comp_te_data = matrix(0,nrow = nrow(test_data),ncol = length(top_n_companies))
+prod_comp_te_data = data.frame(prod_comp_te_data)
+colnames(prod_comp_te_data) = top_n_companies
+
+for(prod_comp in top_n_companies){
+  print(prod_comp)
+  prod_comp_te_data[,prod_comp] = ifelse(str_detect(test_data$production_companies,prod_comp),1,0) # get count
+}
+
+prod_comp_te_data[is.na(prod_comp_te_data)] = 0
+colSums(prod_comp_te_data,na.rm = TRUE) # the distribution
+
+
+rm(text,prod_comp,top_n_companies,total_prod_copm)
+gc()
+
+```
+
+**5. Production Countries**
+
+```{r}
+text = train_data[!is.na(train_data$production_countries),"production_countries"]
+text = cSplit(text,"production_countries",sep = "iso_3166_1", direction = "long")
+text = cSplit(text,"production_countries",sep = "name", direction = "long")
+text = as.character(text$production_countries)
+text = gsub("[[:punct:]]", "", text)
+text = gsub("[[:digit:]]", "", text)
+text = gsub("id", "", text)
+text = str_squish(text)
+text = text[text!=""]
+text = text[!is.na(text)]
+text = text[nchar(text)==2]
+text_df = data.frame(production_countries = as.factor(text))
+text_df = text_df %>% count(production_countries) %>% group_by(production_countries)
+text_df = text_df[order(text_df$n, decreasing = TRUE),]
+head(text_df)
+wordcloud(text_df$production_countries,text_df$n,random.order=FALSE,scale = c(2,0.35),min.freq = 2,colors = brewer.pal(8,"Dark2"),max.words=150)
+
+n=10
+
+top_n_countries = text_df[1:n,"production_countries"]
+top_n_countries = paste0(top_n_countries$production_countries)
+
+# training data
+prod_count_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(top_n_countries))
+prod_count_tr_data = data.frame(prod_count_tr_data)
+colnames(prod_count_tr_data) = top_n_countries
+
+for(prod_count in top_n_countries){
+  
+  print(prod_count)
+  prod_count_tr_data[,prod_count] = ifelse(str_detect(train_data$production_countries,prod_count),1,0) # get count
+  
+}
+
+prod_count_tr_data[is.na(prod_count_tr_data)] = 0
+colSums(prod_count_tr_data,na.rm = TRUE) # the distribution
+
+# testing
+prod_count_te_data = matrix(0,nrow = nrow(test_data),ncol = length(top_n_countries))
+prod_count_te_data = data.frame(prod_count_te_data)
+colnames(prod_count_te_data) = top_n_countries
+
+for(prod_count in top_n_countries){
+  
+  print(prod_count)
+  prod_count_te_data[,prod_count] = ifelse(str_detect(test_data$production_countries,prod_count),1,0) # get count
+  
+}
+
+prod_count_te_data[is.na(prod_count_te_data)] = 0
+colSums(prod_count_te_data,na.rm = TRUE) # the distribution
+
+
+
+rm(text,text_df,prod_count)
+gc()
+
+```
+
+** 6. Spoken Language**
+```{r}
+text = train_data[!is.na(train_data$spoken_languages),"spoken_languages"]
+text = cSplit(text,"spoken_languages",sep = "iso_639_1", direction = "long")
+text = cSplit(text,"spoken_languages",sep = "name", direction = "long")
+text = as.character(text$spoken_languages)
+text = gsub("[[:punct:]]", "", text)
+text = gsub("[[:digit:]]", "", text)
+text = gsub("id", "", text)
+text = str_squish(text)
+text = text[text!=""]
+text = text[!is.na(text)]
+text = text[nchar(text)==2]
+text_df = data.frame(spoken_languages = as.factor(text))
+text_df = text_df %>% count(spoken_languages) %>% group_by(spoken_languages)
+text_df = text_df[order(text_df$n, decreasing = TRUE),]
+head(text_df)
+wordcloud(text_df$spoken_languages,text_df$n,random.order=FALSE,scale = c(2,0.35),min.freq = 2,colors = brewer.pal(8,"Dark2"),max.words=150)
+
+n=5
+
+top_n_lang = text_df[1:n,"spoken_languages"]
+top_n_lang = paste0(top_n_lang$spoken_languages)
+
+# training data
+lang_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(top_n_lang))
+lang_tr_data = data.frame(lang_tr_data)
+colnames(lang_tr_data) = top_n_lang
+
+for(lang in top_n_lang){
+  
+  print(lang)
+  lang_tr_data[,lang] = ifelse(str_detect(train_data$spoken_languages,lang),1,0) # get count
+  
+}
+
+lang_tr_data[is.na(lang_tr_data)] = 0
+colSums(lang_tr_data,na.rm = TRUE) # the distribution
+
+# testing
+
+lang_te_data = matrix(0,nrow = nrow(test_data),ncol = length(top_n_lang))
+lang_te_data = data.frame(lang_te_data)
+colnames(lang_te_data) = top_n_lang
+
+for(lang in top_n_lang){
+  
+  print(lang)
+  lang_te_data[,lang] = ifelse(str_detect(test_data$spoken_languages,lang),1,0) # get count
+  
+}
+
+lang_te_data[is.na(lang_te_data)] = 0
+colSums(lang_te_data,na.rm = TRUE) # the distribution
+
+rm(text,text_df)
+gc()
+
+```
+
+**7. KeyWords**
+```{r}
+
+# in training data
+
+keywords_tr_freq = word_cloud(text = train_data$Keywords[!is.na(train_data$Keywords)],
+                           minfreq = 2,
+                           ngram = 1,stp_wrds = c("name","id","based","film")) # single word
+head(keywords_tr_freq)
+
+# in testing data
+keywords_te_freq = word_cloud(text = test_data$Keywords[!is.na(test_data$Keywords)],
+                           minfreq = 2,
+                           ngram = 1,stp_wrds = c("name","id","based","film")) # single word
+head(keywords_te_freq)
+
+
+# In training data - bi gram
+keywords_tr_freq = word_cloud(text = train_data$Keywords[!is.na(train_data$Keywords)],
+                           minfreq = 2,
+                           ngram = 2,stp_wrds = c("name","id","based","film")) # bi-gram
+head(keywords_tr_freq)
+
+# In testing data - bi gram
+keywords_te_freq = word_cloud(text = test_data$Keywords[!is.na(test_data$Keywords)],
+                              minfreq = 2,
+                              ngram = 2,stp_wrds = c("name","id","based","film")) # bi-gram
+head(keywords_te_freq)
+
+n=10
+top_n_bigram_keywords = keywords_tr_freq[1:n,"token"]
+top_n_bigram_keywords = as.character(top_n_bigram_keywords)
+
+# training data
+keywrds_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(top_n_bigram_keywords))
+keywrds_tr_data = data.frame(keywrds_tr_data)
+colnames(keywrds_tr_data) = top_n_bigram_keywords
+
+for(key in top_n_bigram_keywords){
+  print(key)
+  keywrds_tr_data[,key] = ifelse(str_detect(train_data$Keywords,key),1,0) # get count
+}
+
+keywrds_tr_data[is.na(keywrds_tr_data)] = 0
+colSums(keywrds_tr_data,na.rm = TRUE) # the distribution
+
+# testing
+
+keywrds_te_data = matrix(0,nrow = nrow(test_data),ncol = length(top_n_bigram_keywords))
+keywrds_te_data = data.frame(keywrds_te_data)
+colnames(keywrds_te_data) = top_n_bigram_keywords
+
+for(key in top_n_bigram_keywords){
+  print(key)
+  keywrds_te_data[,key] = ifelse(str_detect(test_data$Keywords,key),1,0) # get count
+}
+
+keywrds_te_data[is.na(keywrds_te_data)] = 0
+colSums(keywrds_te_data,na.rm = TRUE) # the distribution
+
+```
+
+** 8. Cast**
+```{r}
+
+text = train_data$cast
+#text = gsub("[^[:alnum:][:space:](_)]", "", text)
+text = data.frame(text)
+total_tr_cast = apply(text, 1, get_cast)
+plot_histogram(total_tr_cast)
+
+#get count of cast gender = 0
+total_tr_gender_0 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "0"))
+plot_histogram(total_tr_gender_0)
+
+#get count of cast gender = 1
+total_tr_gender_1 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "1"))
+plot_histogram(total_tr_gender_1)
+
+#get count of cast gender = 2
+total_tr_gender_2 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "2"))
+plot_histogram(total_tr_gender_2)
+
+sum(total_tr_cast
+    -total_tr_gender_0
+    -total_tr_gender_1
+    -total_tr_gender_2) # should be zero
+
+
+# testing
+
+text = test_data$cast
+#text = gsub("[^[:alnum:][:space:](_)]", "", text)
+text = data.frame(text)
+total_te_cast = apply(text, 1, get_cast)
+plot_histogram(total_te_cast)
+
+#get count of cast gender = 0
+total_te_gender_0 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "0"))
+plot_histogram(total_te_gender_0)
+
+#get count of cast gender = 1
+total_te_gender_1 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "1"))
+plot_histogram(total_te_gender_1)
+
+#get count of cast gender = 2
+total_te_gender_2 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "2"))
+plot_histogram(total_te_gender_2)
+
+sum(total_te_cast
+    -total_te_gender_0
+    -total_te_gender_1
+    -total_te_gender_2) # should be zero
+
+
+
+rm(text,total_te_cast,total_tr_cast,top_n_lang,lang,dept,key,text_df)
+gc()
+
+```
+
+**9. Crew**
+```{r}
+
+# training crew
+text = train_data$crew
+text = data.frame(text)
+
+#get count of crew gender = 0
+total_tr_crew_gender_0 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "0"))
+plot_histogram(total_tr_crew_gender_0)
+
+#get count of crew gender = 1
+total_tr_crew_gender_1 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "1"))
+plot_histogram(total_tr_crew_gender_1)
+
+#get count of crew gender = 2
+total_tr_crew_gender_2 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "2"))
+plot_histogram(total_tr_crew_gender_2)
+
+#get count of total crew
+total_tr_crew = apply(text, 1, get_crew)
+plot_histogram(total_tr_crew)
+
+sum(total_tr_crew
+    -total_tr_crew_gender_0
+    -total_tr_crew_gender_1
+    -total_tr_crew_gender_2) # should be zero
+
+# testing crew
+
+text = test_data$crew
+text = data.frame(text)
+
+#get count of crew gender = 0
+total_te_crew_gender_0 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "0"))
+plot_histogram(total_te_crew_gender_0)
+
+#get count of crew gender = 1
+total_te_crew_gender_1 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "1"))
+plot_histogram(total_te_crew_gender_1)
+
+#get count of crew gender = 2
+total_te_crew_gender_2 = apply(text, MARGIN=1, FUN=function(x2) gender_count(x2, id = "2"))
+plot_histogram(total_te_crew_gender_2)
+
+#get count of total crew
+total_te_crew = apply(text, 1, get_crew)
+plot_histogram(total_te_crew)
+
+sum(total_te_crew
+    -total_te_crew_gender_0
+    -total_te_crew_gender_1
+    -total_te_crew_gender_2) # should be zero
+
+
+# get department
+text = paste0(train_data$crew[!is.na(train_data$crew)],collapse = " ")
+total_department = get_department(text)
+plot_bar(total_department)
+
+dept_list = unique(total_department)
+
+dept_tr_data = matrix(0,nrow = nrow(train_data),ncol = length(dept_list))
+dept_tr_data = data.frame(dept_tr_data)
+colnames(dept_tr_data) = dept_list
+
+# Hypothesis is that, some departments cost more than others and hence may have relation with
+# budget and revenue
+for(dept in dept_list){
+  
+  print(dept)
+  dept_tr_data[,dept] = str_count(train_data$crew,dept) # get count
+  
+}
+
+dept_tr_data[is.na(dept_tr_data)] = 0
+colSums(dept_tr_data,na.rm = TRUE) # the distribution
+
+# testing department
+dept_te_data = matrix(0,nrow = nrow(test_data),ncol = length(dept_list))
+dept_te_data = data.frame(dept_te_data)
+colnames(dept_te_data) = dept_list
+
+# Hypothesis is that, some departments cost more than others and hence may have relation with
+# budget and revenue
+for(dept in dept_list){
+  
+  print(dept)
+  dept_te_data[,dept] = str_count(test_data$crew,dept) # get count
+  
+}
+
+dept_te_data[is.na(dept_te_data)] = 0
+colSums(dept_te_data,na.rm = TRUE) # the distribution
+
+
+# Actors column due to very low frequency
+dept_tr_data$Actors = NULL
+dept_te_data$Actors = NULL
+
+rm(text,dept,dept_list)
+gc()
+
+
+```
+
+**10. Original Language**
+```{r lang}
+
+
+# create new variables on original language
+
+top_n_original_lang = train_data %>% count(original_language) %>% group_by(original_language)
+top_n_original_lang = top_n_original_lang[order(top_n_original_lang$n,decreasing = TRUE),]
+
+top_n_original_lang = top_n_original_lang[1:5,"original_language"]
+top_n_original_lang = paste0(top_n_original_lang$original_language)
+
+train_data$original_language[!train_data$original_language %in% top_n_original_lang] = "other"
+test_data$original_language[!test_data$original_language %in% top_n_original_lang] = "other"
+
+```
+
+** 11. Budget, Popularity, Runtime, & Revenue**
+```{r}
+
+col_name = c("budget","runtime","popularity","revenue")
+train_data$year = as.character(train_data$year)
+
+# Budget versus Revenue
+
+train_data %>%
+  group_by(year) %>% 
+  summarise(totalBudget = sum(as.numeric(budget), na.rm = TRUE),
+            totalRevenue = sum(as.numeric(revenue), na.rm = TRUE)) %>%
+  ggplot(aes(as.numeric(year)),group = 1)+
+  geom_line(aes(y=totalBudget, color="totalBudget"))+
+  geom_line(aes(y=totalRevenue, color="totalRevenue"))+
+  scale_colour_manual(values=c("black", "orange"))+
+  xlab("Year")+
+  ylab("Budget versus Revenue")+
+  theme_bw()
+
+```
+
+
+```{r}
+
+#Popularity versus Revenue
+
+train_data %>%
+  group_by(year) %>% 
+  summarise(totalPopularity = sum(as.numeric(popularity), na.rm = TRUE),
+            totalRevenue = sum(as.numeric(revenue), na.rm = TRUE)/1000000) %>%
+  ggplot(aes(as.numeric(year)),group = 1)+
+  geom_line(aes(y=totalPopularity, color="totalPopularity"))+
+  geom_line(aes(y=totalRevenue, color="totalRevenue"))+
+  scale_colour_manual(values=c("black", "orange"))+
+  xlab("Year")+
+  ylab("Popularity versus Revenue")+
+  theme_bw()
+
+```
+
+
+```{r}
+
+# scatter-plot matrix
+ggpairs(train_data[,col_name], alpha = 0.4)
+ggpairs(log(train_data[,col_name]+1), alpha = 0.4) # log
+
+```
+
+**log of budget has bi-modal distribution**
+**log of runtime has tigh and peaked distribution**
+** log of popularity follows a normal distribution**
+**log of revenue has skewed distribution (negative)**
+**data has outliers**
+**taking log of data will help in dealing with such cases**
+
+```{r}
+par(mfrow=c(2,2))
+
+# individual varaible analysis
+
+options(scipen = 1000)
+
+box_plot = ggplot(train_data, aes(y=revenue)) + geom_boxplot()
+box_plot
+box_plot = ggplot(train_data[train_data$revenue<100000000,], aes(y=revenue)) + geom_boxplot() # after removing outliers
+box_plot
+
+
+box_plot =ggplot(train_data, aes(y=log(revenue+1))) + geom_boxplot()
+box_plot
+box_plot = ggplot(train_data[log(train_data$revenue+1)>10,], aes(y=log(revenue+1))) + geom_boxplot()
+box_plot
+
+```
+
+
+```{r}
+
+plot_boxplot(train_data[,c(col_name,"month")],by = "month",nrow = 2L, ncol = 2L,
+             geom_boxplot_args = list("outlier.color" = "red"))
+
+plot_boxplot(train_data[as.numeric(train_data$year)>2000,c(col_name,"year")],by = "year",nrow = 2L, ncol = 2L,
+             geom_boxplot_args = list("outlier.color" = "red"))
+
+plot_boxplot(train_data[,c(col_name,"weekday")],by = "weekday",nrow = 2L, ncol = 2L,
+             geom_boxplot_args = list("outlier.color" = "red"))
+
+```
+
+
+```{r}
+
+# between countries and weekday 
+
+prod_count_tr_data = lapply(prod_count_tr_data,as.character)
+prod_count_tr_data = data.frame(prod_count_tr_data)
+temp_data = data.frame(prod_count_tr_data,revenue = train_data$revenue)
+
+
+for(country in top_n_countries){
+  
+  plot_boxplot(temp_data[,c("revenue",country)],by = country,
+               geom_boxplot_args = list("outlier.color" = "red"),title = paste0("Revenure vs Country:",country))
+  
+}
+
+prod_count_tr_data = lapply(prod_count_tr_data,as.numeric)
+prod_count_tr_data = data.frame(prod_count_tr_data)
+
+```
+
+
+# # Missing Data Imputation & Feature Enginerring
+```{r }
+# 1. Drop irrelevant columns
+
+# t1 = train_data
+# t2 = test_data
+
+#train_data = t1
+#test_data = t2
+
+
+train_data$oldness = Sys.Date() - train_data$release_date
+test_data$oldness = Sys.Date() - test_data$release_date
+
+drop_col = c("imdb_id","title","poster_path","crew","production_companies",
+             "production_countries","genres","cast","Keywords","id","status",
+             "tagline","overview","spoken_languages",
+             "original_title","release_date","day")
+
+test_id = test_data$id
+
+train_data = train_data[,!names(train_data) %in% drop_col]
+test_data = test_data[,!names(test_data) %in% drop_col]
+
+# Scaling of numerical variable
+
+train_data[,c("original_language","weekday")] = lapply(train_data[,c("original_language","weekday")],as.factor)
+test_data[,c("original_language","weekday")] = lapply(test_data[,c("original_language","weekday")],as.factor)
+
+train_data[,c("year","month")] = lapply(train_data[,c("year","month")],as.numeric)
+test_data[,c("year","month")] = lapply(test_data[,c("year","month")],as.numeric)
+
+str(train_data)
+str(test_data)
+
+```
+
+** Missing data imputation using mice**
+```{r missing}
+# Missing data plot and imputation
+
+# missing data in train data
+miss_plot <- aggr(train_data, col=c('black','yellow'),
+                  numbers=TRUE, sortVars=TRUE,
+                  labels=names(train_data), cex.axis=.7,
+                  gap=1, ylab=c("Missing data","Pattern")) # no missing values
+
+# missing data in test data
+miss_plot <- aggr(test_data, col=c('black','yellow'),
+                  numbers=TRUE, sortVars=TRUE,
+                  labels=names(test_data), cex.axis=.7,
+                  gap=1, ylab=c("Missing data","Pattern")) # no missing values
+
+imp.runtim <- mice(train_data[,names(train_data) %in% c("popularity","runtime","budget")], m=1, method='cart', printFlag=TRUE)
+imp.runtim = mice::complete(imp.runtim)
+train_data$runtime = imp.runtim$runtime
+
+imp.runtim <- mice(test_data[,names(test_data) %in% c("popularity","runtime","budget")], m=1, method='cart', printFlag=TRUE)
+imp.runtim = mice::complete(imp.runtim)
+test_data$runtime = imp.runtim$runtime
+
+summary(train_data$runtime)
+summary(test_data$runtime)
+
+```
+
+** Gather all new created variables**
+```{r}
+## Add new created variables
+
+train_data = data.frame(train_data,
+                        dept = dept_tr_data,
+                        genre = genre_tr_data,
+                        keywrds = keywrds_tr_data,
+                        lang = lang_tr_data,
+                        prod_comp = prod_comp_tr_data,
+                        prod_count = prod_count_tr_data,
+                        crew_gender_0 = total_tr_crew_gender_0,
+                        crew_gender_1= total_tr_crew_gender_1,
+                        gender_0 = total_tr_gender_0,
+                        gender_1 = total_tr_gender_1,
+                        overview = overview_tr_data)
+
+test_data = data.frame(test_data,
+                       dept = dept_te_data,
+                       genre = genre_te_data,
+                       keywrds = keywrds_te_data,
+                       lang = lang_te_data,
+                       prod_comp = prod_comp_te_data,
+                       prod_count = prod_count_te_data,
+                       crew_gender_0 = total_te_crew_gender_0,
+                       crew_gender_1 = total_te_crew_gender_1,
+                       gender_0 = total_te_gender_0,
+                       gender_1 = total_te_gender_1,
+                       overview = overview_te_data)
+
+encoder = onehot(train_data)
+train_data = predict(encoder,train_data)
+
+encoder = onehot(test_data)
+test_data = predict(encoder,test_data)
+
+train_data = data.frame(train_data)
+test_data = data.frame(test_data)
+
+# Removing Zero- and Near Zero-Variance Predictors
+
+revenue = train_data$revenue 
+train_data$revenue = NULL
+
+# just to make sure orders are same
+
+test_data = test_data[,colnames(train_data)]
+
+nzv <- nearZeroVar(train_data)
+non_var_data <- train_data[, -nzv]
+dim(non_var_data)
+non_variance_vars = names(non_var_data)
+
+train_data = train_data[,non_variance_vars]
+test_data = test_data[,non_variance_vars]
+
+```
+
+
+```{r}
+# preProcValues <- preProcess(train_data[,c("popularity","budget","runtime")], method = c("center", "scale"))
+# trainTransformed <- predict(preProcValues, train_data[,c("popularity","budget","runtime")])
+# testTransformed <- predict(preProcValues, test_data[,c("popularity","budget","runtime")])
+# train_data[,c("popularity","budget","runtime")] = trainTransformed
+# test_data[,c("popularity","budget","runtime")] = testTransformed
+
+# creating new variables based on pattern 
+
+ggpairs(log(train_data[,c("runtime","budget","popularity","oldness")]+1), alpha = 0.4) # taking log of variables
+
+
+summary(train_data$budget)
+
+train_data$budget_cat = ifelse(log(train_data$budget+1)<10,1,0)
+train_data$popularity_cat = ifelse(log(train_data$popularity+1)<1.5,1,
+                                   ifelse(log(train_data$popularity+1)>3.5,3,2))
+
+test_data$budget_cat = ifelse(log(test_data$budget+1)<10,1,0)
+test_data$popularity_cat = ifelse(log(test_data$popularity+1)<1.5,1,
+                                   ifelse(log(test_data$popularity+1)>3.5,3,2))
+
+# Centering and Scaling or log
+
+train_data$budget = log(train_data$budget+1)
+train_data$runtime = log(train_data$runtime+1)
+train_data$popularity = log(train_data$popularity+1)
+
+test_data$budget = log(test_data$budget+1)
+test_data$runtime = log(test_data$runtime+1)
+test_data$popularity = log(test_data$popularity+1)
+
+train_data$popular_run = train_data$popularity * train_data$runtime
+test_data$popular_run = test_data$popularity * test_data$runtime
+
+train_data$budg_popular = train_data$budget/train_data$popularity
+test_data$budg_popular = test_data$budget/test_data$popularity
+
+```
+
+# Outliers Detection
+
+```{r}
+mlof <- lof(train_data[,c("budget","popularity","runtime")], k=5)
+quantile(mlof) # check the probablity distribution of mlof
+thresh = quantile(mlof, .90) #  set95 percent's value as a threshold to decide the value as an outlier. 
+#we can change it and play with this cut-off
+out_index=which(mlof>=thresh)
+
+train_data = train_data[-out_index,]
+new_revenue = revenue[-out_index]
+
+# Add target variable
+train_data$revenue = new_revenue
+train_data$logRevenue = log(train_data$revenue+1)
+
+# let's see plot after outlier removal
+
+ggpairs(train_data[,c(col_name,"oldness")], alpha = 0.4)
+
+```
+
+# Model Fitting
+
+
+** RANDOM FOREST **
+```{r}
+
+# Spliiting data into training & validation
+
+set.seed(100)
+
+index = createDataPartition(train_data[,"revenue"], p = 0.7, list = FALSE)
+train = train_data[index, ]
+val = train_data[-index, ]
+
+#### Model Fitting ####
+
+# 1. RANDOM FOREST
+
+h2o.init(nthreads=-1)
+
+## Load train, val, & test data into cluster from R
+
+trainHex<-as.h2o(train)
+valHex<-as.h2o(val)
+testHex<-as.h2o(test_data)
+
+rfHex <- h2o.randomForest(x=names(train[,!names(train) %in% c("revenue","logRevenue")]),
+                          y="logRevenue", 
+                          ntrees = 100,
+                          #sample_rate_per_class = c(0.125,0.99,0.99,0.12),
+                          training_frame=trainHex,
+                          validation_frame = valHex,
+                          nfolds = 3,
+                          seed = 9,
+                          score_each_iteration = TRUE,
+                          keep_cross_validation_predictions = TRUE)
+
+
+summary(rfHex)
+## validation revenue prediction
+
+cat("Predicting Revenue using RANDOM FOREST\n")
+
+h2o_rf_predict<-as.data.frame(h2o.predict(rfHex,valHex))
+
+cat("RANDOM FOREST MAPE : " ,(sum(abs(val$logRevenue-h2o_rf_predict$predict))/sum(val$logRevenue))*100,"\n") 
+cat("RANDOM FOREST RMSE: ",rmse(val$logRevenue, h2o_rf_predict$predict),"\n")
+cat("Correlation between prediction & actual : ",cor(val$logRevenue,h2o_rf_predict),"\n")
+
+rm(h2o_rf_predict)
+
+# test revenue prediction
+h2o_rf_test_predict<-as.data.frame(h2o.predict(rfHex,testHex))
+h2o_rf_test_predict = exp(h2o_rf_test_predict$predict)
+
+submission = data.frame(id = test_id,revenue=h2o_rf_test_predict)
+write.csv(submission, file = "test_output_rf.csv",row.names=FALSE)
+
+# find importance
+varimp <- h2o.varimp(rfHex)
+varimp
+h2o.varimp_plot(rfHex)
+
+```
+
+** GBM**
+```{r}
+# 2. GBM
+
+
+library(iterators)
+library(parallel)
+library(doMC)
+library(Metrics)
+
+set.seed(222)
+detectCores()
+registerDoMC(4)
+## Set up caret model training parameters
+trail_ctrl <- trainControl(method = "cv", number = 3, 
+                                 verboseIter = FALSE, allowParallel = TRUE)
+
+gbmFit <- train(logRevenue ~ ., method = "gbm", 
+                metric = "RMSE", 
+                maximize = FALSE, 
+                trControl = trail_ctrl, 
+                tuneGrid = expand.grid(n.trees = (4:10) * 50, 
+                                       interaction.depth = c(3,5,10), 
+                                       shrinkage = c(0.05), 
+                                       n.minobsinnode = c(10,15,20)), 
+                data = train[,!names(train) %in% "revenue"], verbose = FALSE)
+
+print(gbmFit)
+
+cat("Predicting Revenue using GBM\n")
+
+## valiation prediction
+gbm_pred <- predict(gbmFit, newdata = val)
+
+cat("GBM MAPE : " ,(sum(abs(val$logRevenue-gbm_pred))/sum(val$logRevenue))*100,"\n") 
+ cat("GBM RMSE: ",rmse(val$logRevenue, gbm_pred),"\n")
+cat("Correlation between prediction & actual : ",cor(gbm_pred,val$logRevenue),"\n")
+
+# test prediction
+gbm_test_pred = predict(gbmFit, newdata = test_data)
+submission = data.frame(id = test_id,revenue=exp(gbm_test_pred))
+write.csv(submission, file = "test_output_gbm.csv",row.names=FALSE)
+
+```
+
+** XGBOOST **
+```{r}
+# 3. XGBOOST
+
+options(scipen = 1000)
+
+library(xgboost)
+set.seed(123)
+## Model parameters trained using xgb.cv function
+
+xgtrain <- xgb.DMatrix(as.matrix(train[,!names(train) %in% c("revenue","logRevenue")]), label = train$logRevenue)
+xgval <- xgb.DMatrix(as.matrix(val[,!names(train) %in% c("revenue","logRevenue")]), label = val$logRevenue)
+xgtest <- xgb.DMatrix(as.matrix(test_data))
+
+
+param <- list(booster="gbtree",
+              eta=0.01,
+              colsample_bytree = 0.3,
+              max_depth = 5,
+              min_child_weight = 2,
+              subsample = 0.9,
+              base_score = mean(train$logRevenue))
+
+set.seed(99)
+
+xgbcv <- xgb.cv( params = param, 
+                 data = xgtrain, 
+                 nrounds = 1000, nfold = 5, 
+                 showsd = T, stratified = T, 
+                 print.every.n = 10, early.stop.round = 20, maximize = F)
+
+xgbcv$best_iteration
+xgbcv$best_ntreelimit
+min(xgbcv$evaluation_log$test_rmse_mean)
+
+mod.xgb <- xgb.train(data=xgtrain,
+                     params = param, nrounds= xgbcv$best_iteration,print_every_n = 50,
+                     watchlist = list(train=xgtrain, val=xgval))
+
+cat("Predicting Revenue using XGBOOST\n")
+xgb_pred = predict(mod.xgb, newdata = xgval)
+
+cat("XGBOOST MAPE : " ,(sum(abs(val$logRevenue-xgb_pred))/sum(val$logRevenue))*100,"\n") # MAPE validation error
+
+cat("XGBOOST RMSE: ",rmse(val$logRevenue, xgb_pred),"\n")
+cat("Correlation between prediction & actual : ",cor(xgb_pred,val$logRevenue),"\n")
+
+xgb_test_pred = predict(mod.xgb, newdata = xgtest)
+xgb_test_pred = exp(xgb_test_pred)
+submission = data.frame(id = test_id,revenue=xgb_test_pred)
+write.csv(submission, file = "test_output_xgboost.csv",row.names=FALSE)
+
+```
+
+** H2O AUTO ML **
+```{r}
+# H20 AUTO ML
+
+h2o_aml <- h2o.automl(x=names(train[,!names(train) %in% c("revenue","logRevenue")]),
+                      y="logRevenue",
+                      training_frame = trainHex,
+                      validation_frame = valHex,
+                      max_models = 5,
+                      seed = 99,
+                      nfolds = 3)
+lb <- h2o_aml@leaderboard
+print(lb, n = nrow(lb))
+
+cat("Predicting Revenue using H2O AUTO ML\n")
+h2o_aml_predict<-as.data.frame(h2o.predict(h2o_aml,valHex))
+
+cat("AUTO ML MAPE: ",(sum(abs(val$logRevenue-h2o_aml_predict$predict))/sum(val$logRevenue))*100,"\n")
+
+cat("AUTO ML RMSE: ",rmse(val$logRevenue, h2o_aml_predict$predict),"\n")
+cat("Correlation between prediction & actual : ", cor(val$logRevenue,h2o_aml_predict$predict),"\n")
+
+rm(h2o_aml_predict)
+
+# test revenue prediction
+h2o_aml_test_predict<-as.data.frame(h2o.predict(h2o_aml,testHex))
+h2o_aml_test_predict = exp(h2o_aml_test_predict$predict)
+
+submission = data.frame(id = test_id,revenue=h2o_aml_test_predict)
+write.csv(submission, file = "test_output_aml.csv",row.names=FALSE)
+
+
+```
